@@ -1,8 +1,11 @@
+import io
 import os
 import sys
 from pathlib import Path
+
 import torch
 import torch._dynamo
+
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.cache_size_limit = 64
 torch._dynamo.config.suppress_errors = True
@@ -33,21 +36,24 @@ LOGS_DIR=LOGS_DIR_PATH.as_posix()
 
 WEB_ADDRESS = os.getenv('WEB_ADDRESS', '127.0.0.1:9966')
 
-import soundfile as sf
-import ChatTTS
 import datetime
-from dotenv import load_dotenv
-from flask import Flask, request, render_template, jsonify,  send_from_directory
 import logging
 from logging.handlers import RotatingFileHandler
+
+import soundfile as sf
+from dotenv import load_dotenv
+from flask import (Flask, Response, jsonify, render_template, request,
+                   send_from_directory)
 from waitress import serve
+
+import ChatTTS
+
 load_dotenv()
-import hashlib,webbrowser
-from modelscope import snapshot_download
+import hashlib
+import webbrowser
+
 import numpy as np
-
-
-
+from modelscope import snapshot_download
 
 # 默认从 modelscope 下载模型,如果想从huggingface下载模型，请将以下3行注释掉
 CHATTTS_DIR = snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
@@ -157,13 +163,68 @@ def tts():
 
     return jsonify({"code": 0, "msg": "ok","filename":WAVS_DIR+'/'+filename,"url":f"http://{request.host}/static/wavs/{filename}"})
 
+# 根据文本返回tts结果，返回到body
+# 请求端根据需要自行选择使用哪个
+# params
+# text:待合成文字
+# voice：音色
+# prompt：
+@app.route('/tts_body', methods=['GET', 'POST'])
+def tts_body():
+    # 原始字符串
+    text = request.args.get("text","").strip() or request.form.get("text","").strip()
+    prompt = request.form.get("prompt",'')
+    try:
+        custom_voice=int(request.form.get("custom_voice",0))
+        voice =  custom_voice if custom_voice>0  else int(request.form.get("voice",2222))
+    except Exception:
+        voice=2222
+    print(f'{voice=},{custom_voice=}')
+    temperature = float(request.form.get("temperature",0.3))
+    top_p = float(request.form.get("top_p",0.7))
+    top_k = int(request.form.get("top_k",20))
 
+    skip_refine = request.form.get("skip_refine",'0')
+    
+    app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
+    if not text:
+        return jsonify({"code": 1, "msg": "text params lost"})
+    std, mean = torch.load(f'{CHATTTS_DIR}/asset/spk_stat.pt').chunk(2)
+    torch.manual_seed(voice)
+
+    rand_spk = chat.sample_random_speaker()
+    #rand_spk = torch.randn(768) * std + mean
+
+    wavs = chat.infer([t for t in text.split("\n") if t.strip()], use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
+        'spk_emb': rand_spk,
+        'temperature':temperature,
+        'top_P':top_p,
+        'top_K':top_k
+    }, params_refine_text= {'prompt': prompt},do_text_normalization=False)
+    # 初始化一个空的numpy数组用于之后的合并
+    combined_wavdata = np.array([], dtype=wavs[0][0].dtype)  # 确保dtype与你的wav数据类型匹配
+
+    for wavdata in wavs:
+        combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
+
+    # 将WAV数据写入到一个字节流中，而不是文件
+    with io.BytesIO() as bytes_io:
+        sf.write(bytes_io, combined_wavdata, 24000, format='WAV', subtype='PCM_16')
+        bytes_io.seek(0)  # 移动到流的开始位置
+        wav_bytes = bytes_io.read()
+
+    # 创建一个Flask Response对象，设置MIME类型为audio/wav
+    return Response(wav_bytes, mimetype="audio/wav")
+    
 
 try:
     host = WEB_ADDRESS.split(':')
     print(f'启动:{host}')
     webbrowser.open(f'http://{WEB_ADDRESS}')
     serve(app,host=host[0], port=int(host[1]))
+except Exception:
+    pass
+
 except Exception:
     pass
 
