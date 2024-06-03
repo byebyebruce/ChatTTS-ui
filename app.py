@@ -1,16 +1,17 @@
 import io
 import os
+import re
 import sys
 from pathlib import Path
-
 import torch
 import torch._dynamo
-
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.cache_size_limit = 64
 torch._dynamo.config.suppress_errors = True
 torch.set_float32_matmul_precision('high')
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+VERSION='0.82'
+
 def get_executable_path():
     # 这个函数会返回可执行文件所在的目录
     if getattr(sys, 'frozen', False):
@@ -18,7 +19,6 @@ def get_executable_path():
         return Path(sys.executable).parent.as_posix()
     else:
         return Path.cwd().as_posix()
-VERSION='0.4'
 
 ROOT_DIR=get_executable_path()
 
@@ -34,37 +34,36 @@ LOGS_DIR_PATH=Path(ROOT_DIR+"/logs")
 LOGS_DIR_PATH.mkdir(parents=True, exist_ok=True)
 LOGS_DIR=LOGS_DIR_PATH.as_posix()
 
-WEB_ADDRESS = os.getenv('WEB_ADDRESS', '127.0.0.1:9966')
-
+import soundfile as sf
+import ChatTTS
 import datetime
+from dotenv import load_dotenv
+from flask import Flask, request, render_template, jsonify,  send_from_directory
 import logging
 from logging.handlers import RotatingFileHandler
-
-import soundfile as sf
-from dotenv import load_dotenv
-from flask import (Flask, Response, jsonify, render_template, request,
-                   send_from_directory)
 from waitress import serve
-
-import ChatTTS
-
 load_dotenv()
-import hashlib
-import webbrowser
-
-import numpy as np
+import hashlib,webbrowser
 from modelscope import snapshot_download
+import numpy as np
+import time
+import utils
+import threading
+
+# 读取 .env 变量
+WEB_ADDRESS = os.getenv('WEB_ADDRESS', '127.0.0.1:9966')
 
 # 默认从 modelscope 下载模型,如果想从huggingface下载模型，请将以下3行注释掉
 CHATTTS_DIR = snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
 chat = ChatTTS.Chat()
-chat.load_models(source="local",local_path=CHATTTS_DIR)
+# 通过将 .env中 compile设为false，禁用推理优化. 其他为启用。一定情况下通过禁用，能提高GPU效率
+chat.load_models(source="local",local_path=CHATTTS_DIR, compile=True if os.getenv('compile','true').lower()!='false' else False)
 
 # 如果希望从 huggingface.co下载模型，将以下注释删掉。将上方3行内容注释掉
 #os.environ['HF_HUB_CACHE']=MODEL_DIR
 #os.environ['HF_ASSETS_CACHE']=MODEL_DIR
 #chat = ChatTTS.Chat()
-#chat.load_models()
+#chat.load_models(compile=True if os.getenv('compile','true').lower()!='false' else False)
 
 
 
@@ -113,6 +112,7 @@ def index():
 # voice：音色
 # custom_voice：自定义音色值
 # skip_refine: 1=跳过refine_text阶段，0=不跳过
+# is_split: 1=启用中英分词，同时将数字转为对应语言发音，0=不启用
 # temperature
 # top_p
 # top_k
@@ -131,8 +131,12 @@ def tts():
     temperature = float(request.form.get("temperature",0.3))
     top_p = float(request.form.get("top_p",0.7))
     top_k = int(request.form.get("top_k",20))
-
-    skip_refine = request.form.get("skip_refine",'0')
+    
+    try:
+        skip_refine = int(request.form.get("skip_refine",0))
+        is_split = int(request.form.get("is_split",0))
+    except Exception:
+        skip_refine=is_split=0
     
     app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
     if not text:
@@ -143,25 +147,57 @@ def tts():
     rand_spk = chat.sample_random_speaker()
     #rand_spk = torch.randn(768) * std + mean
 
+    audio_files = []
     md5_hash = hashlib.md5()
     md5_hash.update(f"{text}-{voice}-{skip_refine}-{prompt}".encode('utf-8'))
     datename=datetime.datetime.now().strftime('%Y%m%d-%H_%M_%S')
-    filename = datename+'-'+md5_hash.hexdigest() + ".wav"
-    wavs = chat.infer([t for t in text.split("\n") if t.strip()], use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
+    filename = datename+'-'+md5_hash.hexdigest()[:8] + ".wav"
+
+    start_time = time.time()
+    
+    # 中英按语言分行
+    text_list=[t.strip() for t in text.split("\n") if t.strip()]
+    new_text=text_list if is_split==0 else utils.split_text(text_list)
+
+    wavs = chat.infer(new_text, use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
         'spk_emb': rand_spk,
         'temperature':temperature,
         'top_P':top_p,
         'top_K':top_k
     }, params_refine_text= {'prompt': prompt},do_text_normalization=False)
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    inference_time_rounded = round(inference_time, 2)
+    print(f"推理时长: {inference_time_rounded} 秒")
+
     # 初始化一个空的numpy数组用于之后的合并
     combined_wavdata = np.array([], dtype=wavs[0][0].dtype)  # 确保dtype与你的wav数据类型匹配
 
     for wavdata in wavs:
         combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
 
+    sample_rate = 24000  # Assuming 24kHz sample rate
+    audio_duration = len(combined_wavdata) / sample_rate
+    audio_duration_rounded = round(audio_duration, 2)
+    print(f"音频时长: {audio_duration_rounded} 秒")
+
     sf.write(WAVS_DIR+'/'+filename, combined_wavdata, 24000)
 
-    return jsonify({"code": 0, "msg": "ok","filename":WAVS_DIR+'/'+filename,"url":f"http://{request.host}/static/wavs/{filename}"})
+    audio_files.append({
+        "filename": WAVS_DIR + '/' + filename,
+        "url": f"http://{request.host}/static/wavs/{filename}",
+        "inference_time": inference_time_rounded,
+        "audio_duration": audio_duration_rounded
+    })
+    result_dict={"code": 0, "msg": "ok", "audio_files": audio_files}
+    # 兼容pyVideoTrans接口调用
+    if len(audio_files)==1:
+        result_dict["filename"]=audio_files[0]['filename']
+        result_dict["url"]=audio_files[0]['url']
+
+    return jsonify(result_dict)
+
 
 # 根据文本返回tts结果，返回到body
 # 请求端根据需要自行选择使用哪个
@@ -171,7 +207,7 @@ def tts():
 # prompt：
 @app.route('/tts_body', methods=['GET', 'POST'])
 def tts_body():
-    # 原始字符串
+     # 原始字符串
     text = request.args.get("text","").strip() or request.form.get("text","").strip()
     prompt = request.form.get("prompt",'')
     try:
@@ -183,8 +219,12 @@ def tts_body():
     temperature = float(request.form.get("temperature",0.3))
     top_p = float(request.form.get("top_p",0.7))
     top_k = int(request.form.get("top_k",20))
-
-    skip_refine = request.form.get("skip_refine",'0')
+    
+    try:
+        skip_refine = int(request.form.get("skip_refine",0))
+        is_split = int(request.form.get("is_split",0))
+    except Exception:
+        skip_refine=is_split=0
     
     app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
     if not text:
@@ -195,18 +235,40 @@ def tts_body():
     rand_spk = chat.sample_random_speaker()
     #rand_spk = torch.randn(768) * std + mean
 
-    wavs = chat.infer([t for t in text.split("\n") if t.strip()], use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
+    audio_files = []
+    md5_hash = hashlib.md5()
+    md5_hash.update(f"{text}-{voice}-{skip_refine}-{prompt}".encode('utf-8'))
+    datename=datetime.datetime.now().strftime('%Y%m%d-%H_%M_%S')
+    filename = datename+'-'+md5_hash.hexdigest()[:8] + ".wav"
+
+    start_time = time.time()
+    
+    # 中英按语言分行
+    text_list=[t.strip() for t in text.split("\n") if t.strip()]
+    new_text=text_list if is_split==0 else utils.split_text(text_list)
+
+    wavs = chat.infer(new_text, use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
         'spk_emb': rand_spk,
         'temperature':temperature,
         'top_P':top_p,
         'top_K':top_k
     }, params_refine_text= {'prompt': prompt},do_text_normalization=False)
+
+    end_time = time.time()
+    inference_time = end_time - start_time
+    inference_time_rounded = round(inference_time, 2)
+    print(f"推理时长: {inference_time_rounded} 秒")
+
     # 初始化一个空的numpy数组用于之后的合并
     combined_wavdata = np.array([], dtype=wavs[0][0].dtype)  # 确保dtype与你的wav数据类型匹配
 
     for wavdata in wavs:
         combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
 
+    sample_rate = 24000  # Assuming 24kHz sample rate
+    audio_duration = len(combined_wavdata) / sample_rate
+    audio_duration_rounded = round(audio_duration, 2)
+    print(f"音频时长: {audio_duration_rounded} 秒")
     # 将WAV数据写入到一个字节流中，而不是文件
     with io.BytesIO() as bytes_io:
         sf.write(bytes_io, combined_wavdata, 24000, format='WAV', subtype='PCM_16')
@@ -217,14 +279,20 @@ def tts_body():
     return Response(wav_bytes, mimetype="audio/wav")
     
 
+@app.route('/clear_wavs', methods=['POST'])
+def clear_wavs():
+    dir_path = 'static/wavs'  # wav音频文件存储目录
+    success, message = utils.ClearWav(dir_path)
+    if success:
+        return jsonify({"code": 0, "msg": message})
+    else:
+        return jsonify({"code": 1, "msg": message})
+
 try:
     host = WEB_ADDRESS.split(':')
-    print(f'启动:{host}')
-    webbrowser.open(f'http://{WEB_ADDRESS}')
+    print(f'启动:{WEB_ADDRESS}')
+    threading.Thread(target=utils.openweb,args=(f'http://{WEB_ADDRESS}',)).start()
     serve(app,host=host[0], port=int(host[1]))
-except Exception:
-    pass
-
-except Exception:
-    pass
+except Exception as e:
+    print(e)
 

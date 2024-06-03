@@ -1,20 +1,27 @@
 # ChatTTS webUI & API 
 
+一个简单的本地网页界面，直接在网页使用 [ChatTTS](https://github.com/2noise/chattts) 将文字合成为语音，支持中英文、数字混杂，并提供API接口。
 
-这是一个用于 [ChatTTS](https://github.com/2noise/chattts) 的Web UI界面项目，提供网页中使用 ChatTTS 合成语音的功能，并支持api接口调用。[常见问题](faq.md)
+[Releases中可下载Windows整合包](https://github.com/jianchang512/ChatTTS-ui/releases)。
 
 
 
 > 界面预览
 >
-> ![image](https://github.com/jianchang512/ChatTTS-ui/assets/3378335/2675d8d9-d0c0-4d3a-b8ae-ef8091dbf4ac)
+> ![image](https://github.com/jianchang512/ChatTTS-ui/assets/3378335/26249652-5511-48a7-abad-76e3247910d2)
+
 >
 
 
-> 试听合成语音效果
-> 
-> https://github.com/jianchang512/ChatTTS-ui/assets/3378335/b64b767c-583a-4a24-bd71-dd766144cc04
+试听合成语音效果
 
+https://github.com/jianchang512/ChatTTS-ui/assets/3378335/bd6aaef9-a49a-4a81-803a-91e3320bf808
+
+
+
+中英数字混杂效果
+
+https://github.com/jianchang512/ChatTTS-ui/assets/3378335/43370012-68c3-495f-a1be-c58035cbe8dc
 
 
 
@@ -22,6 +29,55 @@
 
 1. 从 [Releases](https://github.com/jianchang512/chatTTS-ui/releases)中下载压缩包，解压后双击 app.exe 即可使用
 
+## Linux 下容器部署
+
+### 安装
+
+1. 拉取项目仓库
+
+   在任意路径下克隆项目，例如：
+
+   ```bash
+   git clone https://github.com/jianchang512/ChatTTS-ui.git chat-tts-ui
+   ```
+
+2. 启动 Runner
+
+   进入到项目目录：
+
+   ```bash
+   cd chat-tts-ui
+   ```
+
+   启动容器并查看初始化日志：
+
+   ```bash
+   docker compose up -d
+   docker compose logs -f --no-log-prefix
+
+3. 访问 ChatTTS WebUI
+
+   `启动:['0.0.0.0', '9966']`，也即，访问部署设备的 `IP:9966` 即可，例如：
+
+   - 本机：`http://127.0.0.1:9966`
+   - 服务器: `http://192.168.1.100:9966`
+
+### 更新
+
+1. Get the latest code from the main branch:
+
+   ```bash
+   git checkout main
+   git pull origin main
+   ```
+
+2. Go to the next step and update to the latest image:
+
+   ```bash
+   docker compose down
+   docker compose up -d --build
+   docker compose logs -f --no-log-prefix
+   ```
 
 ## Linux 下源码部署
 
@@ -39,9 +95,9 @@
 	pip install nvidia-cublas-cu11 nvidia-cudnn-cu11
 		
 	```
-	另需安装 CUDA11.8+ ToolKit，请自行搜索安装方法
+	另需安装 CUDA11.8+ ToolKit，请自行搜索安装方法 或参考 https://juejin.cn/post/7318704408727519270
 	
-7. 执行 `python3 app.py` 启动，将自动打开浏览器窗口，默认地址 `http://127.0.0.1:9966`
+7. 执行 `python3 app.py` 启动，将自动打开浏览器窗口，默认地址 `http://127.0.0.1:9966` (注意：默认从 modelscope 魔塔下载模型，不可使用代理下载，请关闭代理)
 
 
 ## MacOS 下源码部署
@@ -51,11 +107,11 @@
 
     ```
     export PATH="/usr/local/opt/python@3.10/bin:$PATH"
-
+	
     source ~/.bash_profile 
 	
 	source ~/.zshrc
-
+	
     ```
 	
 2. 创建空目录 `/data/chattts` 执行命令 `cd /data/chattts &&  git clone https://github.com/jianchang512/chatTTS-ui .`
@@ -63,7 +119,7 @@
 4. 激活虚拟环境 `source ./venv/bin/activate`
 5. 安装依赖 `pip3 install -r requirements.txt`
 6. 安装torch `pip3 install torch torchaudio`
-7. 执行 `python3 app.py` 启动，将自动打开浏览器窗口，默认地址 `http://127.0.0.1:9966`
+7. 执行 `python3 app.py` 启动，将自动打开浏览器窗口，默认地址 `http://127.0.0.1:9966`  (注意：默认从 modelscope 魔塔下载模型，不可使用代理下载，请关闭代理)
 
 
 ## Windows源码部署
@@ -80,84 +136,101 @@
 	
 	`pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118`
 	
-	另需安装 CUDA11.8+ ToolKit，请自行搜索安装方法
+	另需安装 CUDA11.8+ ToolKit，请自行搜索安装方法或参考 https://juejin.cn/post/7318704408727519270
 	
-7. 执行 `python app.py` 启动，将自动打开浏览器窗口，默认地址 `http://127.0.0.1:9966`
+7. 执行 `python app.py` 启动，将自动打开浏览器窗口，默认地址 `http://127.0.0.1:9966`  (注意：默认从 modelscope 魔塔下载模型，不可使用代理下载，请关闭代理)
 
 
-## 源码安装注意
+## 源码部署注意
 
 1. 源码部署启动后，会先从 modelscope下载模型，但modelscope缺少spk_stat.pt，会报错，请点击链接 https://huggingface.co/2Noise/ChatTTS/blob/main/asset/spk_stat.pt 下载 spk_stat.pt，将该文件复制到 `项目目录/models/pzc163/chatTTS/asset/ 文件夹内`
 
+2. 注意 modelscope 仅允许中国大陆ip下载模型，如果遇到 proxy 类错误，请关闭代理。如果你希望从 huggingface.co 下载模型，请打开 `app.py` 查看大约第50行-60行的注释。
 
-2. ChatTTS原始项目新版本有兼容问题，可能会报错 “报错 Normalizer pynini WeTextProcessing nemo_text_processing ”
-
-解决方法：
-
-新版使用了 nemo_text_processing  和  pynini 来处理中文，但遗憾的是，pynini压根无法在windows平台安装和使用，要使用，也只能安装在WSL子系统上。
-
-不管给出的什么安装方式， 比如 
+3. 如果需要GPU加速，必须是英伟达显卡，并且安装 cuda版本的torch。`pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu118`
 
 ```
-pip install pynini==2.1.5 Cython   WeTextProcessing
+# 默认从 modelscope 下载模型,如果想从huggingface下载模型，请将以下3行注释掉
+CHATTTS_DIR = snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
+chat = ChatTTS.Chat()
+chat.load_models(source="local",local_path=CHATTTS_DIR)
+
+# 如果希望从 huggingface.co下载模型，将以下注释删掉。将上方3行内容注释掉
+#os.environ['HF_HUB_CACHE']=MODEL_DIR
+#os.environ['HF_ASSETS_CACHE']=MODEL_DIR
+#chat = ChatTTS.Chat()
+#chat.load_models()
 
 ```
 
-都是无法在Windows上正确安装的
 
-![image](https://github.com/2noise/ChatTTS/assets/3378335/e32c50d1-492c-4b72-958b-78af0575e662)
-
-
-解决方法:
-
-打开 ChatTTS/core.py, 大约143行，注释掉接下来的7行，问题解决
-
-![image](https://github.com/2noise/ChatTTS/assets/3378335/5bdd3dc8-0c7c-485f-b5dc-613f14917319)
-
-或者 chat.infer() 添加参数 do_text_normalization=False， chat.infer(do_text_normalization=False)
-
-
-
-
-[更多常见问题与报错解决方法](faq.md)
+## [常见问题与报错解决方法](faq.md)
 
 
 ## 修改http地址
 
 默认地址是 `http://127.0.0.1:9966`,如果想修改，可打开目录下的 `.env`文件，将 `WEB_ADDRESS=127.0.0.1:9966`改为合适的ip和端口，比如修改为`WEB_ADDRESS=192.168.0.10:9966`以便局域网可访问
 
-## 使用API请求
+## 使用API请求 v0.5+
 
-请求方法:POST
+**请求方法:** POST
 
-请求地址: http://127.0.0.1:9966/tts
+**请求地址:** http://127.0.0.1:9966/tts
 
-请求参数:
+**请求参数:**
 
-text:str 必须， 要合成语音的文字
+text:	str| 必须， 要合成语音的文字
 
-voice:int 可选，  决定音色的数字， 2222 | 7869 | 6653 | 4099 | 5099，可选其一，或者任意传入将随机使用音色
+voice:	int| 可选，默认 2222,  决定音色的数字， 2222 | 7869 | 6653 | 4099 | 5099，可选其一，或者任意传入将随机使用音色
 
-prompt: str 可选，设定 笑声、停顿，例如 [oral_2][laugh_0][break_6]
+prompt:	str| 可选，默认 空， 设定 笑声、停顿，例如 [oral_2][laugh_0][break_6]
 
-返回:json数据
+temperature:	float| 可选，  默认 0.3
 
-code=0 成功，filename=wav文件名，url=可下载的wav网址
+top_p:	float|  可选， 默认 0.7
 
-code=1 失败，msg=错误原因
+top_k:	int|  可选， 默认 20
+
+skip_refine:	int|   可选， 默认0， 1=跳过 refine text，0=不跳过
+
+custom_voice:	int|  可选， 默认0，自定义获取音色值时的种子值，需要大于0的整数，如果设置了则以此为准，将忽略 `voice`
+
+
+**返回:json数据**
+
+成功返回:
+	{code:0,msg:ok,audio_files:[dict1,dict2]}
+	
+	其中 audio_files 是字典数组，每个元素dict为 {filename:wav文件绝对路径，url:可下载的wav网址}
+
+失败返回:
+
+	{code:1,msg:错误原因}
 
 ```
 
+# API调用代码
+
 import requests
 
-res=requests.post('http://127.0.0.1:9966/tts',data={"text":"你好啊亲爱的朋友。[laugh]","voice":2222,"prompt":'[oral_2][laugh_0][break_6]'})
+res = requests.post('http://127.0.0.1:9966/tts', data={
+  "text": "若不懂无需填写",
+  "prompt": "",
+  "voice": "3333",
+  "temperature": 0.3,
+  "top_p": 0.7,
+  "top_k": 20,
+  "skip_refine": 0,
+  "custom_voice": 0
+})
 print(res.json())
 
-#成功
-{code:0,msg:'ok',filename:1.wav,url:http://${location.host}/static/wavs/1.wav}
+#ok
+{code:0, msg:'ok', audio_files:[{filename: E:/python/chattts/static/wavs/20240601-22_12_12-c7456293f7b5e4dfd3ff83bbd884a23e.wav, url: http://127.0.0.1:9966/static/wavs/20240601-22_12_12-c7456293f7b5e4dfd3ff83bbd884a23e.wav}]}
 
-#error 
-{code:1,msg:"error"}
+#error
+{code:1, msg:"error"}
+
 
 ```
 
@@ -170,4 +243,4 @@ print(res.json())
 2. 测试无问题后，在主界面中选择`ChatTTS`
 
 ![image](https://github.com/jianchang512/ChatTTS-ui/assets/3378335/7118325f-2b9a-46ce-a584-1d5c6dc8e2da)
-   
+
