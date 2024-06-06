@@ -10,62 +10,42 @@ torch._dynamo.config.cache_size_limit = 64
 torch._dynamo.config.suppress_errors = True
 torch.set_float32_matmul_precision('high')
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
-VERSION='0.82'
-
-def get_executable_path():
-    # 这个函数会返回可执行文件所在的目录
-    if getattr(sys, 'frozen', False):
-        # 如果程序是被“冻结”打包的，使用这个路径
-        return Path(sys.executable).parent.as_posix()
-    else:
-        return Path.cwd().as_posix()
-
-ROOT_DIR=get_executable_path()
-
-MODEL_DIR_PATH=Path(ROOT_DIR+"/models")
-MODEL_DIR_PATH.mkdir(parents=True, exist_ok=True)
-MODEL_DIR=MODEL_DIR_PATH.as_posix()
-
-WAVS_DIR_PATH=Path(ROOT_DIR+"/static/wavs")
-WAVS_DIR_PATH.mkdir(parents=True, exist_ok=True)
-WAVS_DIR=WAVS_DIR_PATH.as_posix()
-
-LOGS_DIR_PATH=Path(ROOT_DIR+"/logs")
-LOGS_DIR_PATH.mkdir(parents=True, exist_ok=True)
-LOGS_DIR=LOGS_DIR_PATH.as_posix()
 
 import soundfile as sf
 import ChatTTS
 import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, render_template, jsonify,  send_from_directory
+from flask import Flask, request, render_template, jsonify,  send_from_directory, Response
 import logging
 from logging.handlers import RotatingFileHandler
 from waitress import serve
 load_dotenv()
-import hashlib,webbrowser
+from random import random
 from modelscope import snapshot_download
 import numpy as np
 import time
-import utils
 import threading
+from uilib.cfg import WEB_ADDRESS, SPEAKER_DIR, LOGS_DIR, WAVS_DIR, MODEL_DIR, ROOT_DIR
+from uilib import utils,VERSION
 
-# 读取 .env 变量
-WEB_ADDRESS = os.getenv('WEB_ADDRESS', '127.0.0.1:9966')
-
-# 默认从 modelscope 下载模型,如果想从huggingface下载模型，请将以下3行注释掉
-CHATTTS_DIR = snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
+CHATTTS_DIR= MODEL_DIR+'/pzc163/chatTTS'
+# 默认从 modelscope 下载模型,如果想从huggingface下载模型，请将以下代码注释掉
+# 如果已存在则不再下载和检测更新，便于离线内网使用
+if not os.path.exists(CHATTTS_DIR+"/config/path.yaml"):
+    snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
 chat = ChatTTS.Chat()
-# 通过将 .env中 compile设为false，禁用推理优化. 其他为启用。一定情况下通过禁用，能提高GPU效率
 chat.load_models(source="local",local_path=CHATTTS_DIR, compile=True if os.getenv('compile','true').lower()!='false' else False)
 
 # 如果希望从 huggingface.co下载模型，将以下注释删掉。将上方3行内容注释掉
-#os.environ['HF_HUB_CACHE']=MODEL_DIR
-#os.environ['HF_ASSETS_CACHE']=MODEL_DIR
-#chat = ChatTTS.Chat()
-#chat.load_models(compile=True if os.getenv('compile','true').lower()!='false' else False)
-
-
+# 如果已存在则不再下载和检测更新，便于离线内网使用
+#CHATTTS_DIR=MODEL_DIR+'/models--2Noise--ChatTTS'
+#if not os.path.exists(CHATTTS_DIR):
+    #import huggingface_hub
+    #os.environ['HF_HUB_CACHE']=MODEL_DIR
+    #os.environ['HF_ASSETS_CACHE']=MODEL_DIR
+    #huggingface_hub.snapshot_download(cache_dir=MODEL_DIR,repo_id="2Noise/ChatTTS", allow_patterns=["*.pt", "*.yaml"])
+    # chat = ChatTTS.Chat()
+    # chat.load_models(source="local",local_path=CHATTTS_DIR, compile=True if os.getenv('compile','true').lower()!='false' else False)
 
 
 # 配置日志
@@ -131,40 +111,67 @@ def tts():
     temperature = float(request.form.get("temperature",0.3))
     top_p = float(request.form.get("top_p",0.7))
     top_k = int(request.form.get("top_k",20))
-    
+    skip_refine=0
+    is_split=0
+    speed=5
+    refine_max_new_token=384
+    infer_max_new_token=2048
+    text_seed=42
     try:
         skip_refine = int(request.form.get("skip_refine",0))
         is_split = int(request.form.get("is_split",0))
-    except Exception:
-        skip_refine=is_split=0
+    except Exception as e:
+        print(e)
+    try:
+        text_seed = int(request.form.get("text_seed",42))
+    except Exception as e:
+        print(e)
+    try:
+        speed = int(request.form.get("speed",5))
+    except Exception as e:
+        print(e)
+    try:
+        refine_max_new_token=int(request.form.get("refine_max_new_token",384))
+        infer_max_new_token=int(request.form.get("infer_max_new_token",2048))
+    except Exception as e:
+        print(e)
     
     app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
     if not text:
         return jsonify({"code": 1, "msg": "text params lost"})
-    std, mean = torch.load(f'{CHATTTS_DIR}/asset/spk_stat.pt').chunk(2)
-    torch.manual_seed(voice)
-
-    rand_spk = chat.sample_random_speaker()
-    #rand_spk = torch.randn(768) * std + mean
+    # 固定音色
+    rand_spk=utils.load_speaker(voice)
+    if rand_spk is None:    
+        print(f'根据seed={voice}获取随机音色')
+        torch.manual_seed(voice)
+        std, mean = torch.load(f'{CHATTTS_DIR}/asset/spk_stat.pt').chunk(2)
+        #rand_spk = chat.sample_random_speaker()        
+        rand_spk = torch.randn(768) * std + mean
+        # 保存音色
+        utils.save_speaker(voice,rand_spk)
+    else:
+        print(f'固定音色 seed={voice}')
 
     audio_files = []
-    md5_hash = hashlib.md5()
-    md5_hash.update(f"{text}-{voice}-{skip_refine}-{prompt}".encode('utf-8'))
-    datename=datetime.datetime.now().strftime('%Y%m%d-%H_%M_%S')
-    filename = datename+'-'+md5_hash.hexdigest()[:8] + ".wav"
+    
 
     start_time = time.time()
     
     # 中英按语言分行
     text_list=[t.strip() for t in text.split("\n") if t.strip()]
     new_text=text_list if is_split==0 else utils.split_text(text_list)
-
+    if text_seed>0:
+        torch.manual_seed(text_seed)
+    print(f'{text_seed=}')
+    print(f'[speed_{speed}]')
     wavs = chat.infer(new_text, use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
         'spk_emb': rand_spk,
+        'prompt':f'[speed_{speed}]',
         'temperature':temperature,
         'top_P':top_p,
-        'top_K':top_k
-    }, params_refine_text= {'prompt': prompt},do_text_normalization=False)
+        'top_K':top_k,
+        'max_new_token':infer_max_new_token
+    }, params_refine_text= {'prompt': prompt,'max_new_token':refine_max_new_token},do_text_normalization=False)
 
     end_time = time.time()
     inference_time = end_time - start_time
@@ -181,7 +188,9 @@ def tts():
     audio_duration = len(combined_wavdata) / sample_rate
     audio_duration_rounded = round(audio_duration, 2)
     print(f"音频时长: {audio_duration_rounded} 秒")
-
+    
+    
+    filename = datetime.datetime.now().strftime('%H%M%S_')+f"use{inference_time_rounded}s-audio{audio_duration_rounded}s-seed{voice}-te{temperature}-tp{top_p}-tk{top_k}-textlen{len(text)}-{str(random())[2:7]}" + ".wav"
     sf.write(WAVS_DIR+'/'+filename, combined_wavdata, 24000)
 
     audio_files.append({
@@ -219,40 +228,64 @@ def tts_body():
     temperature = float(request.form.get("temperature",0.3))
     top_p = float(request.form.get("top_p",0.7))
     top_k = int(request.form.get("top_k",20))
-    
+    skip_refine=0
+    is_split=0
+    speed=5
+    refine_max_new_token=384
+    infer_max_new_token=2048
+    text_seed=42
     try:
         skip_refine = int(request.form.get("skip_refine",0))
         is_split = int(request.form.get("is_split",0))
-    except Exception:
-        skip_refine=is_split=0
+    except Exception as e:
+        print(e)
+    try:
+        text_seed = int(request.form.get("text_seed",42))
+    except Exception as e:
+        print(e)
+    try:
+        speed = int(request.form.get("speed",5))
+    except Exception as e:
+        print(e)
+    try:
+        refine_max_new_token=int(request.form.get("refine_max_new_token",384))
+        infer_max_new_token=int(request.form.get("infer_max_new_token",2048))
+    except Exception as e:
+        print(e)
     
     app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
     if not text:
         return jsonify({"code": 1, "msg": "text params lost"})
-    std, mean = torch.load(f'{CHATTTS_DIR}/asset/spk_stat.pt').chunk(2)
-    torch.manual_seed(voice)
-
-    rand_spk = chat.sample_random_speaker()
-    #rand_spk = torch.randn(768) * std + mean
-
-    audio_files = []
-    md5_hash = hashlib.md5()
-    md5_hash.update(f"{text}-{voice}-{skip_refine}-{prompt}".encode('utf-8'))
-    datename=datetime.datetime.now().strftime('%Y%m%d-%H_%M_%S')
-    filename = datename+'-'+md5_hash.hexdigest()[:8] + ".wav"
+    # 固定音色
+    rand_spk=utils.load_speaker(voice)
+    if rand_spk is None:    
+        print(f'根据seed={voice}获取随机音色')
+        torch.manual_seed(voice)
+        std, mean = torch.load(f'{CHATTTS_DIR}/asset/spk_stat.pt').chunk(2)
+        #rand_spk = chat.sample_random_speaker()        
+        rand_spk = torch.randn(768) * std + mean
+        # 保存音色
+        utils.save_speaker(voice,rand_spk)
+    else:
+        print(f'固定音色 seed={voice}')
 
     start_time = time.time()
     
     # 中英按语言分行
     text_list=[t.strip() for t in text.split("\n") if t.strip()]
     new_text=text_list if is_split==0 else utils.split_text(text_list)
-
+    if text_seed>0:
+        torch.manual_seed(text_seed)
+    print(f'{text_seed=}')
+    print(f'[speed_{speed}]')
     wavs = chat.infer(new_text, use_decoder=True, skip_refine_text=True if int(skip_refine)==1 else False,params_infer_code={
         'spk_emb': rand_spk,
+        'prompt':f'[speed_{speed}]',
         'temperature':temperature,
         'top_P':top_p,
-        'top_K':top_k
-    }, params_refine_text= {'prompt': prompt},do_text_normalization=False)
+        'top_K':top_k,
+        'max_new_token':infer_max_new_token
+    }, params_refine_text= {'prompt': prompt,'max_new_token':refine_max_new_token},do_text_normalization=False)
 
     end_time = time.time()
     inference_time = end_time - start_time
@@ -269,6 +302,7 @@ def tts_body():
     audio_duration = len(combined_wavdata) / sample_rate
     audio_duration_rounded = round(audio_duration, 2)
     print(f"音频时长: {audio_duration_rounded} 秒")
+    
     # 将WAV数据写入到一个字节流中，而不是文件
     with io.BytesIO() as bytes_io:
         sf.write(bytes_io, combined_wavdata, 24000, format='WAV', subtype='PCM_16')
@@ -295,4 +329,3 @@ try:
     serve(app,host=host[0], port=int(host[1]))
 except Exception as e:
     print(e)
-
