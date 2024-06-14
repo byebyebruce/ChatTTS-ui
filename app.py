@@ -2,7 +2,10 @@ import io
 import os
 import re
 import sys
+import io
+import wave
 from pathlib import Path
+print('Starting...')
 import torch
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
@@ -15,11 +18,13 @@ import soundfile as sf
 import ChatTTS
 import datetime
 from dotenv import load_dotenv
-from flask import Flask, request, render_template, jsonify,  send_from_directory, Response
+from flask import Flask, request, render_template, jsonify,  send_from_directory,send_file
 import logging
 from logging.handlers import RotatingFileHandler
 from waitress import serve
 load_dotenv()
+
+
 from random import random
 from modelscope import snapshot_download
 import numpy as np
@@ -28,13 +33,38 @@ import threading
 from uilib.cfg import WEB_ADDRESS, SPEAKER_DIR, LOGS_DIR, WAVS_DIR, MODEL_DIR, ROOT_DIR
 from uilib import utils,VERSION
 
+from flask import Response
+
+from uilib.utils import is_chinese_os,modelscope_status
+env_lang=os.getenv('lang','')
+if env_lang=='zh':
+    is_cn= True
+elif env_lang=='en':
+    is_cn=False
+else:
+    is_cn=is_chinese_os()
+    
 CHATTTS_DIR= MODEL_DIR+'/pzc163/chatTTS'
-# 默认从 modelscope 下载模型,如果想从huggingface下载模型，请将以下代码注释掉
+# 默认从 modelscope 下载模型
 # 如果已存在则不再下载和检测更新，便于离线内网使用
-if not os.path.exists(CHATTTS_DIR+"/config/path.yaml"):
-    snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
+if not os.path.exists(CHATTTS_DIR+"/config/path.yaml") and not os.path.exists(MODEL_DIR+'/models--2Noise--ChatTTS'):
+    # 可连接modelscope
+    if modelscope_status():
+        print('modelscope ok')
+        snapshot_download('pzc163/chatTTS',cache_dir=MODEL_DIR)
+    else:
+        print('from huggingface')
+        CHATTTS_DIR=MODEL_DIR+'/models--2Noise--ChatTTS'
+        import huggingface_hub
+        os.environ['HF_HUB_CACHE']=MODEL_DIR
+        os.environ['HF_ASSETS_CACHE']=MODEL_DIR
+        huggingface_hub.snapshot_download(cache_dir=MODEL_DIR,repo_id="2Noise/ChatTTS", allow_patterns=["*.pt", "*.yaml"])
+  
+#print(f'{is_cn=}')  
+#exit()       
 chat = ChatTTS.Chat()
-chat.load_models(source="local",local_path=CHATTTS_DIR, compile=True if os.getenv('compile','true').lower()!='false' else False)
+device=os.getenv('device','default')
+chat.load_models(source="local",local_path=CHATTTS_DIR, device=None if device=='default' else device,compile=True if os.getenv('compile','true').lower()!='false' else False)
 
 # 如果希望从 huggingface.co下载模型，将以下注释删掉。将上方3行内容注释掉
 # 如果已存在则不再下载和检测更新，便于离线内网使用
@@ -81,7 +111,7 @@ def static_files(filename):
 
 @app.route('/')
 def index():
-    return render_template("index.html",weburl=WEB_ADDRESS,version=VERSION)
+    return render_template(f"index{'' if is_cn else 'en'}.html",weburl=WEB_ADDRESS,version=VERSION)
 
 
 # 根据文本返回tts结果，返回 filename=文件名 url=可下载地址
@@ -89,52 +119,53 @@ def index():
 # params:
 #
 # text:待合成文字
+# prompt：
 # voice：音色
 # custom_voice：自定义音色值
 # skip_refine: 1=跳过refine_text阶段，0=不跳过
-# is_split: 1=启用中英分词，同时将数字转为对应语言发音，0=不启用
 # temperature
 # top_p
 # top_k
-# prompt：
+# speed
+# text_seed
+# refine_max_new_token
+# infer_max_new_token
+# wav
 @app.route('/tts', methods=['GET', 'POST'])
 def tts():
     # 原始字符串
     text = request.args.get("text","").strip() or request.form.get("text","").strip()
-    prompt = request.form.get("prompt",'')
-    try:
-        custom_voice=int(request.form.get("custom_voice",0))
-        voice =  custom_voice if custom_voice>0  else int(request.form.get("voice",2222))
-    except Exception:
-        voice=2222
-    print(f'{voice=},{custom_voice=}')
-    temperature = float(request.form.get("temperature",0.3))
-    top_p = float(request.form.get("top_p",0.7))
-    top_k = int(request.form.get("top_k",20))
-    skip_refine=0
-    is_split=0
-    speed=5
-    refine_max_new_token=384
-    infer_max_new_token=2048
-    text_seed=42
-    try:
-        skip_refine = int(request.form.get("skip_refine",0))
-        is_split = int(request.form.get("is_split",0))
-    except Exception as e:
-        print(e)
-    try:
-        text_seed = int(request.form.get("text_seed",42))
-    except Exception as e:
-        print(e)
-    try:
-        speed = int(request.form.get("speed",5))
-    except Exception as e:
-        print(e)
-    try:
-        refine_max_new_token=int(request.form.get("refine_max_new_token",384))
-        infer_max_new_token=int(request.form.get("infer_max_new_token",2048))
-    except Exception as e:
-        print(e)
+    prompt = request.args.get("prompt","").strip() or request.form.get("prompt",'')
+
+    # 默认值
+    defaults = {
+        "custom_voice": 0,
+        "voice": 2222,
+        "temperature": 0.3,
+        "top_p": 0.7,
+        "top_k": 20,
+        "skip_refine": 0,
+        "speed":5,
+        "text_seed":42,
+        "refine_max_new_token": 384,
+        "infer_max_new_token": 2048,
+        "wav": 0,
+    }
+
+    # 获取
+    custom_voice = utils.get_parameter(request, "custom_voice", defaults["custom_voice"], int)
+    voice = custom_voice if custom_voice > 0 else utils.get_parameter(request, "voice", defaults["voice"], int)
+    temperature = utils.get_parameter(request, "temperature", defaults["temperature"], float)
+    top_p = utils.get_parameter(request, "top_p", defaults["top_p"], float)
+    top_k = utils.get_parameter(request, "top_k", defaults["top_k"], int)
+    skip_refine = utils.get_parameter(request, "skip_refine", defaults["skip_refine"], int)
+    speed = utils.get_parameter(request, "speed", defaults["speed"], int)
+    text_seed = utils.get_parameter(request, "text_seed", defaults["text_seed"], int)
+    refine_max_new_token = utils.get_parameter(request, "refine_max_new_token", defaults["refine_max_new_token"], int)
+    infer_max_new_token = utils.get_parameter(request, "infer_max_new_token", defaults["infer_max_new_token"], int)
+    wav = utils.get_parameter(request, "wav", defaults["wav"], int)
+        
+        
     
     app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
     if not text:
@@ -159,7 +190,7 @@ def tts():
     
     # 中英按语言分行
     text_list=[t.strip() for t in text.split("\n") if t.strip()]
-    new_text=text_list if is_split==0 else utils.split_text(text_list)
+    new_text=utils.split_text(text_list)
     if text_seed>0:
         torch.manual_seed(text_seed)
     print(f'{text_seed=}')
@@ -184,14 +215,14 @@ def tts():
     for wavdata in wavs:
         combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
 
-    sample_rate = 24000  # Assuming 24kHz sample rate
+    sample_rate = 16000  # Assuming 24kHz sample rate
     audio_duration = len(combined_wavdata) / sample_rate
     audio_duration_rounded = round(audio_duration, 2)
     print(f"音频时长: {audio_duration_rounded} 秒")
     
     
     filename = datetime.datetime.now().strftime('%H%M%S_')+f"use{inference_time_rounded}s-audio{audio_duration_rounded}s-seed{voice}-te{temperature}-tp{top_p}-tk{top_k}-textlen{len(text)}-{str(random())[2:7]}" + ".wav"
-    sf.write(WAVS_DIR+'/'+filename, combined_wavdata, 24000)
+    sf.write(WAVS_DIR+'/'+filename, combined_wavdata, sample_rate)
 
     audio_files.append({
         "filename": WAVS_DIR + '/' + filename,
@@ -200,12 +231,20 @@ def tts():
         "audio_duration": audio_duration_rounded
     })
     result_dict={"code": 0, "msg": "ok", "audio_files": audio_files}
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
     # 兼容pyVideoTrans接口调用
     if len(audio_files)==1:
         result_dict["filename"]=audio_files[0]['filename']
         result_dict["url"]=audio_files[0]['url']
 
-    return jsonify(result_dict)
+    if wav>0:
+        return send_file(audio_files[0]['filename'], mimetype='audio/x-wav')
+    else:
+        return jsonify(result_dict)
 
 
 # 根据文本返回tts结果，返回到body
@@ -216,64 +255,64 @@ def tts():
 # prompt：
 @app.route('/tts_body', methods=['GET', 'POST'])
 def tts_body():
-     # 原始字符串
+    # 原始字符串
     text = request.args.get("text","").strip() or request.form.get("text","").strip()
-    prompt = request.form.get("prompt",'')
-    try:
-        custom_voice=int(request.form.get("custom_voice",0))
-        voice =  custom_voice if custom_voice>0  else int(request.form.get("voice",2222))
-    except Exception:
-        voice=2222
-    print(f'{voice=},{custom_voice=}')
-    temperature = float(request.form.get("temperature",0.3))
-    top_p = float(request.form.get("top_p",0.7))
-    top_k = int(request.form.get("top_k",20))
-    skip_refine=0
-    is_split=0
-    speed=5
-    refine_max_new_token=384
-    infer_max_new_token=2048
-    text_seed=42
-    try:
-        skip_refine = int(request.form.get("skip_refine",0))
-        is_split = int(request.form.get("is_split",0))
-    except Exception as e:
-        print(e)
-    try:
-        text_seed = int(request.form.get("text_seed",42))
-    except Exception as e:
-        print(e)
-    try:
-        speed = int(request.form.get("speed",5))
-    except Exception as e:
-        print(e)
-    try:
-        refine_max_new_token=int(request.form.get("refine_max_new_token",384))
-        infer_max_new_token=int(request.form.get("infer_max_new_token",2048))
-    except Exception as e:
-        print(e)
-    
+    prompt = request.args.get("prompt","").strip() or request.form.get("prompt",'')
+
+    # 默认值
+    defaults = {
+        "custom_voice": 0,
+        "voice": 2222,
+        "temperature": 0.3,
+        "top_p": 0.7,
+        "top_k": 20,
+        "skip_refine": 0,
+        "speed":5,
+        "text_seed":42,
+        "refine_max_new_token": 384,
+        "infer_max_new_token": 2048,
+        "wav": 0,
+    }
+
+    # 获取
+    custom_voice = utils.get_parameter(request, "custom_voice", defaults["custom_voice"], int)
+    voice = custom_voice if custom_voice > 0 else utils.get_parameter(request, "voice", defaults["voice"], int)
+    temperature = utils.get_parameter(request, "temperature", defaults["temperature"], float)
+    top_p = utils.get_parameter(request, "top_p", defaults["top_p"], float)
+    top_k = utils.get_parameter(request, "top_k", defaults["top_k"], int)
+    skip_refine = utils.get_parameter(request, "skip_refine", defaults["skip_refine"], int)
+    speed = utils.get_parameter(request, "speed", defaults["speed"], int)
+    text_seed = utils.get_parameter(request, "text_seed", defaults["text_seed"], int)
+    refine_max_new_token = utils.get_parameter(request, "refine_max_new_token", defaults["refine_max_new_token"], int)
+    infer_max_new_token = utils.get_parameter(request, "infer_max_new_token", defaults["infer_max_new_token"], int)
+    wav = utils.get_parameter(request, "wav", defaults["wav"], int)
+
+
+
     app.logger.info(f"[tts]{text=}\n{voice=},{skip_refine=}\n")
     if not text:
         return jsonify({"code": 1, "msg": "text params lost"})
     # 固定音色
     rand_spk=utils.load_speaker(voice)
-    if rand_spk is None:    
+    if rand_spk is None:
         print(f'根据seed={voice}获取随机音色')
         torch.manual_seed(voice)
         std, mean = torch.load(f'{CHATTTS_DIR}/asset/spk_stat.pt').chunk(2)
-        #rand_spk = chat.sample_random_speaker()        
+        #rand_spk = chat.sample_random_speaker()
         rand_spk = torch.randn(768) * std + mean
         # 保存音色
         utils.save_speaker(voice,rand_spk)
     else:
         print(f'固定音色 seed={voice}')
 
+    audio_files = []
+
+
     start_time = time.time()
-    
+
     # 中英按语言分行
     text_list=[t.strip() for t in text.split("\n") if t.strip()]
-    new_text=text_list if is_split==0 else utils.split_text(text_list)
+    new_text=utils.split_text(text_list)
     if text_seed>0:
         torch.manual_seed(text_seed)
     print(f'{text_seed=}')
@@ -298,14 +337,14 @@ def tts_body():
     for wavdata in wavs:
         combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
 
-    sample_rate = 24000  # Assuming 24kHz sample rate
+    sample_rate = 16000  # Assuming 24kHz sample rate
     audio_duration = len(combined_wavdata) / sample_rate
     audio_duration_rounded = round(audio_duration, 2)
     print(f"音频时长: {audio_duration_rounded} 秒")
     
     # 将WAV数据写入到一个字节流中，而不是文件
     with io.BytesIO() as bytes_io:
-        sf.write(bytes_io, combined_wavdata, 24000, format='WAV', subtype='PCM_16')
+        sf.write(bytes_io, combined_wavdata, sample_rate, format='WAV', subtype='PCM_16')
         bytes_io.seek(0)  # 移动到流的开始位置
         wav_bytes = bytes_io.read()
 
@@ -324,7 +363,7 @@ def clear_wavs():
 
 try:
     host = WEB_ADDRESS.split(':')
-    print(f'启动:{WEB_ADDRESS}')
+    print(f'Start:{WEB_ADDRESS}')
     threading.Thread(target=utils.openweb,args=(f'http://{WEB_ADDRESS}',)).start()
     serve(app,host=host[0], port=int(host[1]))
 except Exception as e:

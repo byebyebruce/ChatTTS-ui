@@ -1,4 +1,5 @@
-import os
+import os,sys
+import requests
 import time
 import re
 import webbrowser
@@ -7,11 +8,22 @@ import pandas as pd
 # ref: https://github.com/PaddlePaddle/PaddleSpeech/tree/develop/paddlespeech/t2s/frontend/zh_normalization
 from .zh_normalization import TextNormalizer
 from .cfg import SPEAKER_DIR
+from functools import partial
 
 def openweb(url):
     time.sleep(3)
     webbrowser.open(url)
 
+def get_parameter(request, param, default, cast_type):
+    #  先request.args 后request.form 然后转换cast_type=int|float类型。
+    for method in [request.args.get, request.form.get]:
+        value = method(param, "").strip()
+        if value:
+            try:
+                return cast_type(value)
+            except ValueError:
+                break  # args转换失败，退出尝试form
+    return default  # 失败，返回默认值。
 
 
 # 数字转为英文读法
@@ -127,11 +139,27 @@ def num2text(text):
 def split_text(text_list):
     
     tx = TextNormalizer()
-    
+    haserror=False
     result=[]
     for i,text in enumerate(text_list):
-        tmp="".join(tx.normalize(text)) if get_lang(text)=='zh' else num2text(text)
-        #tmp=num2text(text)
+
+        if get_lang(text)=='zh':
+            tmp="".join(tx.normalize(text))
+        elif haserror:
+            tmp=num2text(text)
+        else:
+            try:
+                # 先尝试使用 nemo_text_processing 处理英文
+                from nemo_text_processing.text_normalization.normalize import Normalizer
+                fun = partial(Normalizer(input_case='cased', lang="en").normalize, verbose=False, punct_post_process=True)
+                tmp=fun(text)
+                print(f'使用nemo处理英文ok')
+            except Exception as e:
+                print(f"nemo处理英文失败，改用自定义预处理")
+                print(e)
+                haserror=True
+                tmp=num2text(text)
+
         if len(tmp)>200:
             tmp_res=split_text_by_punctuation(tmp)
             result=result+tmp_res
@@ -144,8 +172,8 @@ def split_text(text_list):
 def split_text_by_punctuation(text):
     # 定义长度限制
     min_length = 150
-    punctuation_marks = "。？！，、；：“”‘’》」』）】…—"
-    english_punctuation = ".?!,:;\"')}…"
+    punctuation_marks = "。？！，、；：”’》」』）】…—"
+    english_punctuation = ".?!,:;)}…"
     
     # 结果列表
     result = []
@@ -229,3 +257,47 @@ def is_network():
     else:
         return True
     return False
+
+
+
+def is_chinese_os():
+    import subprocess
+    try:
+        import locale
+        # Windows系统
+        if sys.platform.startswith('win'):
+            lang = locale.getdefaultlocale()[0]
+            return lang.startswith('zh_CN') or lang.startswith('zh_TW') or lang.startswith('zh_HK')
+        # macOS系统
+        elif sys.platform == 'darwin':
+            process = subprocess.Popen(['defaults', 'read', '-g', 'AppleLocale'], stdout=subprocess.PIPE)
+            output, error = process.communicate()
+            if error:
+                # 若默认方法出错，则尝试环境变量
+                return os.getenv('LANG', '').startswith('zh_')
+            locale = output.decode().strip()
+            return locale.startswith('zh_')
+        # 类Unix系统
+        elif sys.platform.startswith('linux') or sys.platform.startswith('cygwin'):
+            return os.getenv('LANG', '').startswith('zh_')
+        # 其他系统
+        else:
+            return False
+
+    except Exception as e:
+        # 输出异常到控制台，实际应用中应该使用日志记录异常
+        print(e)
+        return False
+
+
+
+def modelscope_status():
+    #return False
+    try:
+        res=requests.head("https://www.modelscope.cn/")
+        print(res)
+        if res.status_code!=200:
+            return False
+    except Exception as e:
+        return False
+    return True
