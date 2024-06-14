@@ -2,40 +2,47 @@ import io
 import os
 import re
 import sys
-import io
 import wave
 from pathlib import Path
+
 print('Starting...')
 import torch
 import torch._dynamo
+
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.cache_size_limit = 64
 torch._dynamo.config.suppress_errors = True
 torch.set_float32_matmul_precision('high')
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
-import soundfile as sf
-import ChatTTS
 import datetime
-from dotenv import load_dotenv
-from flask import Flask, request, render_template, jsonify,  send_from_directory,send_file
 import logging
 from logging.handlers import RotatingFileHandler
+
+import soundfile as sf
+from dotenv import load_dotenv
+from flask import (Flask, jsonify, render_template, request, send_file,
+                   send_from_directory)
 from waitress import serve
+
+import ChatTTS
+
 load_dotenv()
 
 
-from random import random
-from modelscope import snapshot_download
-import numpy as np
-import time
 import threading
-from uilib.cfg import WEB_ADDRESS, SPEAKER_DIR, LOGS_DIR, WAVS_DIR, MODEL_DIR, ROOT_DIR
-from uilib import utils,VERSION
+import time
+from random import random
 
+import numpy as np
 from flask import Response
+from modelscope import snapshot_download
 
-from uilib.utils import is_chinese_os,modelscope_status
+from uilib import VERSION, utils
+from uilib.cfg import (LOGS_DIR, MODEL_DIR, ROOT_DIR, SPEAKER_DIR, WAVS_DIR,
+                       WEB_ADDRESS)
+from uilib.utils import is_chinese_os, modelscope_status
+
 env_lang=os.getenv('lang','')
 if env_lang=='zh':
     is_cn= True
@@ -215,7 +222,7 @@ def tts():
     for wavdata in wavs:
         combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
 
-    sample_rate = 16000  # Assuming 24kHz sample rate
+    sample_rate = 24000  # Assuming 24kHz sample rate
     audio_duration = len(combined_wavdata) / sample_rate
     audio_duration_rounded = round(audio_duration, 2)
     print(f"音频时长: {audio_duration_rounded} 秒")
@@ -337,7 +344,7 @@ def tts_body():
     for wavdata in wavs:
         combined_wavdata = np.concatenate((combined_wavdata, wavdata[0]))
 
-    sample_rate = 16000  # Assuming 24kHz sample rate
+    sample_rate = 24000  # Assuming 24kHz sample rate
     audio_duration = len(combined_wavdata) / sample_rate
     audio_duration_rounded = round(audio_duration, 2)
     print(f"音频时长: {audio_duration_rounded} 秒")
